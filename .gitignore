@@ -1,0 +1,10 @@
+build/
+deps/
+*.obj
+*.lib
+*.exp
+*.pdb
+*.log
+*.csv
+*.bin
+*.ini
