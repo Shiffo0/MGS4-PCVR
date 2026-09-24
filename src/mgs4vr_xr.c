@@ -1,4 +1,4 @@
-/* MGS4-PCVR - Copyright (c) 2026 Shiffo0. MIT; see LICENSE and THIRD_PARTY_NOTICES.md. */
+/* mgs4vr_xr.c - see mgs4vr_xr.h. */
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
 #include <windows.h>
@@ -66,19 +66,28 @@ static XrSwapchain g_swap;
 static XrSwapchainImageD3D11KHR g_images[MAX_IMAGES];
 static uint32_t g_image_count;
 static unsigned g_swap_w, g_swap_h;
-static int g_running;                       
+static int g_running;                       /* between xrBeginSession and xrEndSession */
 
-static CRITICAL_SECTION g_cs;               
+static CRITICAL_SECTION g_cs;               /* guards the capture store and g_dev/g_ctx hand-over */
 static LONG g_cs_state;
-static ID3D11Device *g_dev;                 
+static ID3D11Device *g_dev;                 /* the game's device, AddRef'd */
 static ID3D11DeviceContext *g_ctx;
-static ID3D11Texture2D *g_store;            
+static ID3D11Texture2D *g_store;            /* copy of the last presented back buffer */
+static ID3D11Texture2D *g_eye_store[2];
+static MGS4VR_EYE_PACKET g_eye_packet[2];
+static ULONGLONG g_eye_tick[2];
+static void clear_eyes(void){int e;for(e=0;e<2;++e){if(g_eye_store[e])ID3D11Texture2D_Release(g_eye_store[e]);g_eye_store[e]=NULL;}memset(g_eye_packet,0,sizeof(g_eye_packet));}
+static int pair_ready(XrTime time){
+ int e;if(!g_eye_store[0] || !g_eye_store[1] || !mgs4vr_packet_pair(&g_eye_packet[0],&g_eye_packet[1]))return 0;
+ for(e=0;e<2;++e)if(GetTickCount64()-g_eye_tick[e]>150 || time-g_eye_packet[e].display_time>150000000 || g_eye_packet[e].display_time-time>50000000)return 0;
+ return 1;
+}
 static unsigned g_store_w, g_store_h;
 static DXGI_FORMAT g_store_format;
+static int last_projection;
 static volatile LONG g_store_valid;
 static volatile LONG g_refused_logged;
 
-static SRWLOCK config_lock=SRWLOCK_INIT;
 static MGS4VR_XR_CONFIG g_cfg[2];
 static volatile LONG g_cfg_idx;
 static int g_have_anchor;
@@ -108,6 +117,8 @@ static void cs_init(void) {
     while (g_cs_state != 2) Sleep(0);
 }
 
+/* ---------------------------------------------------------------- math --- */
+
 static void quat_rotate(const float q[4], const float v[3], float out[3]) {
     float x = q[0], y = q[1], z = q[2], w = q[3];
     float tx = 2.0f * (y * v[2] - z * v[1]);
@@ -126,7 +137,8 @@ void mgs4vr_xr_screen_pose(const float head_quat[4], const float head_pos[3], fl
     n = (float)sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
     if (!(n > 1e-6f)) { q[0] = q[1] = q[2] = 0; q[3] = 1; } else { q[0] /= n; q[1] /= n; q[2] /= n; q[3] /= n; }
     quat_rotate(q, fwd0, f);
-    
+    /* Heading from the forward vector; looking straight up or down leaves no
+       horizontal forward component, then the right vector carries the heading. */
     if (f[0] * f[0] + f[2] * f[2] > 0.04f) yaw = (float)atan2(-f[0], -f[2]);
     else { quat_rotate(q, right0, r); yaw = (float)atan2(-r[2], r[0]); }
     out_quat[0] = 0; out_quat[1] = (float)sin(yaw * 0.5f); out_quat[2] = 0; out_quat[3] = (float)cos(yaw * 0.5f);
@@ -134,6 +146,8 @@ void mgs4vr_xr_screen_pose(const float head_quat[4], const float head_pos[3], fl
     out_pos[1] = head_pos[1] + height_offset_m;
     out_pos[2] = head_pos[2] - (float)cos(yaw) * dist_m;
 }
+
+/* -------------------------------------------------------------- loader --- */
 
 static int resolve(const char *name, void *slot) {
     PFN_xrVoidFunction fn = NULL;
@@ -200,6 +214,8 @@ static int create_instance(void) {
     return 1;
 }
 
+/* ------------------------------------------------------------- session --- */
+
 static void destroy_swapchain(void) {
     if (g_swap != XR_NULL_HANDLE) { xr.DestroySwapchain(g_swap); g_swap = XR_NULL_HANDLE; }
     g_image_count = 0; g_swap_w = g_swap_h = 0;
@@ -219,6 +235,7 @@ static void destroy_instance(void) {
     if (g_inst != XR_NULL_HANDLE) { xr.DestroyInstance(g_inst); g_inst = XR_NULL_HANDLE; }
 }
 
+/* 1 ready, 0 not yet (no headset / no device: retry later), -1 fatal for this instance */
 static int create_session(void) {
     XrSystemGetInfo sgi;
     XrSystemProperties sp;
@@ -236,7 +253,7 @@ static int create_session(void) {
 
     memset(&sgi, 0, sizeof(sgi)); sgi.type = XR_TYPE_SYSTEM_GET_INFO; sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     r = xr.GetSystem(g_inst, &sgi, &g_sys);
-    if (r == XR_ERROR_FORM_FACTOR_UNAVAILABLE) {                 
+    if (r == XR_ERROR_FORM_FACTOR_UNAVAILABLE) {                 /* runtime alive, headset not connected yet: transient */
         if (InterlockedIncrement(&g_stats.no_hmd_polls) == 1) log_msg("no headset available yet - will keep polling");
         return 0;
     }
@@ -245,9 +262,9 @@ static int create_session(void) {
     if (XR_SUCCEEDED(xr.GetSystemProperties(g_inst, g_sys, &sp))) log_msg("system %s", sp.systemName);
 
     EnterCriticalSection(&g_cs); dev = g_dev; if (dev) ID3D11Device_AddRef(dev); LeaveCriticalSection(&g_cs);
-    if (!dev) return 0;                                           
+    if (!dev) return 0;                                           /* the game has not presented yet */
     memset(&req, 0, sizeof(req)); req.type = XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR;
-    r = xr.GetD3D11GraphicsRequirementsKHR(g_inst, g_sys, &req);  
+    r = xr.GetD3D11GraphicsRequirementsKHR(g_inst, g_sys, &req);  /* mandatory before xrCreateSession */
     if (XR_FAILED(r)) { log_msg("xrGetD3D11GraphicsRequirementsKHR failed (%d)", (int)r); ID3D11Device_Release(dev); return -1; }
     if (SUCCEEDED(ID3D11Device_QueryInterface(dev, &IID_IDXGIDevice, (void **)&dxgi)) && dxgi) {
         if (SUCCEEDED(IDXGIDevice_GetAdapter(dxgi, &adapter)) && adapter) {
@@ -259,7 +276,7 @@ static int create_session(void) {
     }
     if (!same) { log_msg("the game renders on a different adapter than the headset - cannot share textures"); ID3D11Device_Release(dev); return -1; }
     if (ID3D11Device_GetFeatureLevel(dev) < req.minFeatureLevel) { log_msg("game device feature level too low for the runtime"); ID3D11Device_Release(dev); return -1; }
-    
+    /* Two threads drive this context from now on. */
     if (SUCCEEDED(ID3D11DeviceContext_QueryInterface(g_ctx, &IID_ID3D11Multithread, (void **)&mt)) && mt) {
         ID3D11Multithread_SetMultithreadProtected(mt, TRUE);
         if (!ID3D11Multithread_GetMultithreadProtected(mt)) log_msg("WARNING: multithread protection did not switch on");
@@ -288,7 +305,9 @@ static int ensure_swapchain(unsigned w, unsigned h) {
     if (g_swap != XR_NULL_HANDLE && g_swap_w == w && g_swap_h == h) return 1;
     destroy_swapchain();
     if (XR_FAILED(xr.EnumerateSwapchainFormats(g_sess, 64, &n, formats)) || !n) { log_msg("no swapchain formats"); return 0; }
-    
+    /* The game presents R8G8B8A8_UNORM holding sRGB-encoded colours. The _SRGB
+       sibling is in the same TYPELESS family (CopyResource stays legal) and tells
+       the compositor how to decode it; plain UNORM would be shown too bright. */
     for (i = 0; i < n && !want; ++i) if (formats[i] == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) want = formats[i];
     for (i = 0; i < n && !want; ++i) if (formats[i] == DXGI_FORMAT_R8G8B8A8_UNORM) want = formats[i];
     if (!want) { log_msg("runtime offers no RGBA8 swapchain format (first is %lld)", (long long)formats[0]); return 0; }
@@ -306,6 +325,7 @@ static int ensure_swapchain(unsigned w, unsigned h) {
     return 1;
 }
 
+/* 1 keep going, 0 this session/instance is over */
 static int pump_events(void) {
     XrEventDataBuffer ev;
     for (;;) {
@@ -323,10 +343,11 @@ static int pump_events(void) {
                 memset(&bi, 0, sizeof(bi)); bi.type = XR_TYPE_SESSION_BEGIN_INFO;
                 bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
                 if (XR_FAILED(xr.BeginSession(g_sess, &bi))) { log_msg("xrBeginSession failed"); return 0; }
-                g_running = 1; g_have_anchor = 0;               
+                g_running = 1; g_have_anchor = 0;               /* headset (back) on: re-anchor the screen in front of it */
                 InterlockedIncrement(&g_stats.session_begins);
             } else if (s->state == XR_SESSION_STATE_STOPPING) {
-                
+                /* Normal when the headset comes off. End the session and keep
+                   pumping: READY arrives again when it is put back on. */
                 publish_views(0, 0);
                 if (g_running && XR_FAILED(xr.EndSession(g_sess))) { log_msg("xrEndSession failed"); return 0; }
                 g_running = 0;
@@ -344,7 +365,7 @@ static void publish_views(XrTime time, int locate) {
     XrView views[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
     uint32_t count = 0;
     int e, j;
-    if (!cb) return;
+    if (!cb && !g_cfg[g_cfg_idx&1].stereo) return;
     out.sequence = ++g_views_sequence; out.display_time = time;
     info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     info.displayTime = time; info.space = g_local;
@@ -367,19 +388,23 @@ static void publish_views(XrTime time, int locate) {
         }
     }
     if (!out.valid) { memset(out.quat,0,sizeof(out.quat)); memset(out.pos,0,sizeof(out.pos)); memset(out.fov,0,sizeof(out.fov)); }
+    if(!out.valid){EnterCriticalSection(&g_cs);memset(g_eye_packet,0,sizeof(g_eye_packet));LeaveCriticalSection(&g_cs);}
     if(cb)cb(&out);
 }
 
 static int frame(void) {
     XrFrameWaitInfo wi; XrFrameState fs; XrFrameBeginInfo bi; XrFrameEndInfo ei;
     XrCompositionLayerQuad quad;
+    XrCompositionLayerProjection projection;
+    XrCompositionLayerProjectionView pv[2];
+    MGS4VR_EYE_PACKET submitted[2];
     const XrCompositionLayerBaseHeader *layers[1];
-    MGS4VR_XR_CONFIG cfg;
+    MGS4VR_XR_CONFIG cfg = g_cfg[g_cfg_idx & 1];
     XrResult r;
-    int have_layer = 0;
+    int have_layer = 0,use_stereo=0,head_valid=0;
+    float frame_hq[4],frame_hp[3];
     unsigned w, h;
 
-    AcquireSRWLockShared(&config_lock);cfg=g_cfg[g_cfg_idx&1];ReleaseSRWLockShared(&config_lock);
     memset(&wi, 0, sizeof(wi)); wi.type = XR_TYPE_FRAME_WAIT_INFO;
     memset(&fs, 0, sizeof(fs)); fs.type = XR_TYPE_FRAME_STATE;
     r = xr.WaitFrame(g_sess, &wi, &fs);
@@ -398,9 +423,10 @@ static int frame(void) {
             float hq[4] = { loc.pose.orientation.x, loc.pose.orientation.y, loc.pose.orientation.z, loc.pose.orientation.w };
             float hp[3] = { loc.pose.position.x, loc.pose.position.y, loc.pose.position.z };
             void (*cb)(const float *, const float *) = g_pose_cb;
+            memcpy(frame_hq,hq,sizeof(hq));memcpy(frame_hp,hp,sizeof(hp));head_valid=1;
             g_stats.last_head_pos[0] = hp[0]; g_stats.last_head_pos[1] = hp[1]; g_stats.last_head_pos[2] = hp[2];
             InterlockedIncrement(&g_stats.poses);
-            if (cb) cb(hq, hp);                        
+            if (cb) cb(hq, hp);                        /* head tracking, independent of the theater layer */
             if (cfg.enabled && g_store_valid &&
                 (!g_have_anchor || g_anchor_recenter != cfg.recenter || g_anchor_dist != cfg.dist_m || g_anchor_off != cfg.height_offset_m)) {
                 float q[4], p[3];
@@ -412,9 +438,9 @@ static int frame(void) {
                 log_msg("theater anchored at (%.2f, %.2f, %.2f) m, %.2f m from the head, %.2f m wide", p[0], p[1], p[2], cfg.dist_m, cfg.width_m);
             }
         }
-        EnterCriticalSection(&g_cs); w = g_store_w; h = g_store_h; LeaveCriticalSection(&g_cs);
+        EnterCriticalSection(&g_cs); w = g_store_w; h = g_store_h; if(cfg.stereo)w*=2; LeaveCriticalSection(&g_cs);
         if (!cfg.enabled || !g_store_valid) { w = 0; h = 0; }
-        if (g_have_anchor && w && h && ensure_swapchain(w, h)) {
+        if ((cfg.stereo || g_have_anchor) && w && h && ensure_swapchain(w, h)) {
             XrSwapchainImageAcquireInfo ai; XrSwapchainImageWaitInfo swi; XrSwapchainImageReleaseInfo ri;
             uint32_t idx = 0;
             memset(&ai, 0, sizeof(ai)); ai.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
@@ -423,13 +449,21 @@ static int frame(void) {
             if (XR_SUCCEEDED(xr.AcquireSwapchainImage(g_swap, &ai, &idx)) && idx < g_image_count) {
                 if (XR_SUCCEEDED(xr.WaitSwapchainImage(g_swap, &swi))) {
                     EnterCriticalSection(&g_cs);
-                    if (g_store && g_store_w == g_swap_w && g_store_h == g_swap_h && g_ctx) {
+                    if(cfg.stereo && g_ctx && g_store_w*2==g_swap_w && g_store_h==g_swap_h && pair_ready(fs.predictedDisplayTime)){
+                        int e;for(e=0;e<2;++e)ID3D11DeviceContext_CopySubresourceRegion(g_ctx,(ID3D11Resource *)g_images[idx].texture,0,e*g_store_w,0,0,(ID3D11Resource *)g_eye_store[e],0,NULL);
+                        memcpy(submitted,g_eye_packet,sizeof(submitted));have_layer=1;use_stereo=1;InterlockedIncrement(&g_stats.copies);
+                    } else if(cfg.stereo && g_have_anchor && g_store_valid && g_store && g_ctx && g_store_w*2==g_swap_w && g_store_h==g_swap_h){
+                        /* Keep the packed swapchain; quad samples only its left
+                           half. No stale right-eye image and no resize churn. */
+                        ID3D11DeviceContext_CopySubresourceRegion(g_ctx,(ID3D11Resource *)g_images[idx].texture,0,0,0,0,(ID3D11Resource *)g_store,0,NULL);
+                        have_layer=1;InterlockedIncrement(&g_stats.copies);
+                    } else if (!cfg.stereo && g_store && g_store_w == g_swap_w && g_store_h == g_swap_h && g_ctx) {
                         ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_images[idx].texture, (ID3D11Resource *)g_store);
                         if(cfg.menu_open){
                             MGS4VR_MENU menu;int mw=g_swap_w*3/4,mh=g_swap_h*3/4;void *pixels;
                             D3D11_BOX box;
                             mgs4vr_menu_init(&menu,cfg.follow_head,(int)(cfg.dist_m*100+.5f));
-                            menu.open=1;menu.row=cfg.menu_row;menu.available=cfg.head_available;
+                            menu.open=1;menu.row=cfg.menu_row;menu.available=cfg.head_available;menu.stereo=cfg.menu_stereo;menu.stereo_available=cfg.stereo_available;
                             pixels=mgs4vr_menu_bitmap(&menu,mw,mh);
                             if(pixels){box.left=(g_swap_w-mw)/2;box.right=box.left+mw;box.top=(g_swap_h-mh)/2;box.bottom=box.top+mh;box.front=0;box.back=1;
                                 ID3D11DeviceContext_UpdateSubresource(g_ctx,(ID3D11Resource *)g_images[idx].texture,0,&box,pixels,mw*4,0);}
@@ -447,13 +481,32 @@ static int frame(void) {
     ei.displayTime = fs.predictedDisplayTime;
     ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     if (have_layer) {
+        if(!use_stereo && last_projection && head_valid){
+            float q[4],p[3];mgs4vr_xr_screen_pose(frame_hq,frame_hp,cfg.dist_m,cfg.height_offset_m,q,p);
+            memcpy(&g_anchor.orientation,q,16);memcpy(&g_anchor.position,p,12);
+            memcpy(g_stats.anchor_pos,p,12);memcpy(g_stats.anchor_quat,q,16);
+        }
+        last_projection=use_stereo;
         memset(&quad, 0, sizeof(quad)); quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
         quad.space = g_local; quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         quad.subImage.swapchain = g_swap;
-        quad.subImage.imageRect.extent.width = (int32_t)g_swap_w; quad.subImage.imageRect.extent.height = (int32_t)g_swap_h;
+        quad.subImage.imageRect.extent.width = (int32_t)(cfg.stereo?g_swap_w/2:g_swap_w); quad.subImage.imageRect.extent.height = (int32_t)g_swap_h;
         quad.pose = g_anchor;
         quad.size.width = cfg.width_m; quad.size.height = cfg.width_m * (float)g_swap_h / (float)quad.subImage.imageRect.extent.width;
         layers[0] = (const XrCompositionLayerBaseHeader *)&quad;
+        if(use_stereo){
+            int e;memset(&projection,0,sizeof(projection));memset(pv,0,sizeof(pv));
+            projection.type=XR_TYPE_COMPOSITION_LAYER_PROJECTION;projection.space=g_local;projection.viewCount=2;projection.views=pv;
+            for(e=0;e<2;++e){
+                pv[e].type=XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+                memcpy(&pv[e].pose.orientation,submitted[e].quat,16);memcpy(&pv[e].pose.position,submitted[e].pos,12);
+                memcpy(&pv[e].fov,submitted[e].fov,16);
+                pv[e].subImage.swapchain=g_swap;pv[e].subImage.imageRect.offset.x=e*(int)(g_swap_w/2);
+                pv[e].subImage.imageRect.extent.width=g_swap_w/2;pv[e].subImage.imageRect.extent.height=g_swap_h;
+            }
+            layers[0]=(const XrCompositionLayerBaseHeader *)&projection;
+        }
+        if(use_stereo)InterlockedIncrement(&g_stats.stereo_layers);else InterlockedIncrement(&g_stats.theater_layers);
         ei.layerCount = 1; ei.layers = layers;
         InterlockedIncrement(&g_stats.frames_with_layer);
     } else InterlockedIncrement(&g_stats.frames_without_layer);
@@ -474,7 +527,7 @@ static DWORD WINAPI xr_thread(LPVOID unused) {
     }
     while (!g_stop) {
         int s;
-        if (!create_instance()) { wait_ms(10000); continue; }      
+        if (!create_instance()) { wait_ms(10000); continue; }      /* no runtime active: look again later */
         for (s = 0; !g_stop && s == 0; ) { s = create_session(); if (s == 0) wait_ms(2000); }
         if (s == 1) {
             while (!g_stop) {
@@ -492,7 +545,9 @@ static DWORD WINAPI xr_thread(LPVOID unused) {
     return 0;
 }
 
-void mgs4vr_xr_on_present(void *dxgi_swapchain, unsigned device_flags) {
+/* ----------------------------------------------------------------- api --- */
+
+void mgs4vr_xr_on_present_eye(void *dxgi_swapchain, unsigned device_flags,const MGS4VR_EYE_PACKET *packet) {
     IDXGISwapChain *sc = (IDXGISwapChain *)dxgi_swapchain;
     ID3D11Texture2D *back = NULL;
     D3D11_TEXTURE2D_DESC td;
@@ -505,17 +560,18 @@ void mgs4vr_xr_on_present(void *dxgi_swapchain, unsigned device_flags) {
     }
     EnterCriticalSection(&g_cs);
     g_store_valid=0;
+    if(g_cfg[g_cfg_idx&1].stereo && (!packet || !packet->valid))memset(g_eye_packet,0,sizeof(g_eye_packet));
     if (!g_dev) {
         ID3D11Device *dev = NULL;
         if (SUCCEEDED(IDXGISwapChain_GetDevice(sc, &IID_ID3D11Device, (void **)&dev)) && dev) {
-            g_dev = dev;                                            
+            g_dev = dev;                                            /* keeps the reference for the life of the module */
             ID3D11Device_GetImmediateContext(dev, &g_ctx);
         }
     }
     if (g_dev && SUCCEEDED(IDXGISwapChain_GetBuffer(sc, 0, &IID_ID3D11Texture2D, (void **)&back)) && back) {
         ID3D11Texture2D_GetDesc(back, &td);
         if (g_store && (g_store_w != td.Width || g_store_h != td.Height || g_store_format != td.Format)) {
-            ID3D11Texture2D_Release(g_store); g_store = NULL; InterlockedExchange(&g_store_valid, 0);
+            clear_eyes();ID3D11Texture2D_Release(g_store); g_store = NULL; InterlockedExchange(&g_store_valid, 0);
         }
         if (!g_store) {
             D3D11_TEXTURE2D_DESC cd = td;
@@ -526,21 +582,32 @@ void mgs4vr_xr_on_present(void *dxgi_swapchain, unsigned device_flags) {
         }
         if (g_store) {
             ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_store, (ID3D11Resource *)back);
+            if(g_cfg[g_cfg_idx&1].stereo && packet && packet->valid && packet->eye>=0 && packet->eye<=1){
+                int e=packet->eye;D3D11_TEXTURE2D_DESC ed;
+                if(g_eye_packet[1-e].valid && (g_eye_packet[1-e].epoch!=packet->epoch || (unsigned)(packet->camera_serial-g_eye_packet[1-e].camera_serial)!=1))memset(g_eye_packet,0,sizeof(g_eye_packet));
+                if(!g_eye_store[e]){ID3D11Texture2D_GetDesc(g_store,&ed);ID3D11Device_CreateTexture2D(g_dev,&ed,NULL,&g_eye_store[e]);}
+                if(g_eye_store[e]){ID3D11DeviceContext_CopyResource(g_ctx,(ID3D11Resource *)g_eye_store[e],(ID3D11Resource *)g_store);g_eye_packet[e]=*packet;g_eye_tick[e]=GetTickCount64();}
+                else {memset(g_eye_packet,0,sizeof(g_eye_packet));InterlockedIncrement(&g_stats.capture_failures);}
+            }
             InterlockedExchange(&g_store_valid, 1);
             InterlockedIncrement(&g_stats.captures);
         }
         ID3D11Texture2D_Release(back);
     } else if (g_dev) InterlockedIncrement(&g_stats.capture_failures);
+    if(!g_store_valid)memset(g_eye_packet,0,sizeof(g_eye_packet));
     LeaveCriticalSection(&g_cs);
 }
+void mgs4vr_xr_on_present(void *sc,unsigned flags){mgs4vr_xr_on_present_eye(sc,flags,NULL);}
 
 void mgs4vr_xr_configure(const MGS4VR_XR_CONFIG *cfg) {
-    LONG next;
+    LONG next = (g_cfg_idx + 1) & 1;
     MGS4VR_XR_CONFIG c = *cfg;
     if (!(c.dist_m >= 0.5f && c.dist_m <= 10.0f)) c.dist_m = 2.5f;
     if (!(c.width_m >= 0.5f && c.width_m <= 12.0f)) c.width_m = 3.2f;
     if (!(c.height_offset_m >= -2.0f && c.height_offset_m <= 2.0f)) c.height_offset_m = 0.0f;
-    AcquireSRWLockExclusive(&config_lock);next=(g_cfg_idx+1)&1;g_cfg[next]=c;InterlockedExchange(&g_cfg_idx,next);ReleaseSRWLockExclusive(&config_lock);
+    cs_init();EnterCriticalSection(&g_cs);memset(g_eye_packet,0,sizeof(g_eye_packet));LeaveCriticalSection(&g_cs);
+    g_cfg[next] = c;
+    InterlockedExchange(&g_cfg_idx, next);
 }
 
 int mgs4vr_xr_start(void (*log)(const char *fmt, ...), const char *loader_path, void *get_instance_proc_addr) {
@@ -562,15 +629,15 @@ void mgs4vr_xr_stop(void) {
     g_stop = 1;
     if (g_thread) { WaitForSingleObject(g_thread, 15000); CloseHandle(g_thread); g_thread = NULL; }
     EnterCriticalSection(&g_cs);
-    
+    clear_eyes();
     if (g_store) { ID3D11Texture2D_Release(g_store); g_store = NULL; }
     g_store_valid = 0; g_store_w = g_store_h = 0;
     if (g_ctx) { ID3D11DeviceContext_Release(g_ctx); g_ctx = NULL; }
     if (g_dev) { ID3D11Device_Release(g_dev); g_dev = NULL; }
     LeaveCriticalSection(&g_cs);
     if (g_loader) { FreeLibrary(g_loader); g_loader = NULL; }
-    mgs4vr_menu_free();
     g_gipa = NULL;
+    mgs4vr_menu_free();
     g_started = 0;
 }
 

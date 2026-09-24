@@ -6,18 +6,22 @@
 #include <string.h>
 #include <math.h>
 #include "mgs4vr_cam.h"
+#include "mgs4vr_eye.h"
 
 #define MAX_THREADS   512
 #define MAX_TSTATE    32
 #define WATCHDOG_TRAPS_PER_SEC 200000
 
+#define STASH_DEPTH 8
+typedef struct {ULONG64 camera,source,ret;MGS4VR_EYE_TICKET eye;int eye_applied;} STASH;
 typedef struct {
+    int depth;STASH s[STASH_DEPTH];
     volatile LONG tid;
-    float last_in[16], last_out[16];   
+    float last_in[16], last_out[16];
     int have_last;
-    ULONG64 seam_src;                  
-    int cine_pending;                  
-    MGS4VR_CAM_ADJUST last_adj;        
+    ULONG64 seam_src;
+    int cine_pending;
+    MGS4VR_CAM_ADJUST last_adj;
     int have_adj;
 } TSTATE;
 
@@ -25,13 +29,13 @@ static MGS4VR_CAM_CONFIG g_cfg;
 static void (*volatile g_log)(const char *fmt, ...);
 static PVOID g_veh;
 static volatile LONG g_armed;
-static ULONG64 g_addr[4];               
+static ULONG64 g_addr[4];
 static ULONG64 g_base;
-static ULONG64 g_adj_callers[2];        
+static ULONG64 g_adj_callers[2];
 
 static volatile LONG g_adj_lock, g_adj_seq;
 static MGS4VR_CAM_ADJUST g_adj_live;
-static volatile LONG g_adj_blur_off;    
+static volatile LONG g_adj_blur_off;
 static LONGLONG g_qpf, g_qpc0;
 static ULONG64 g_skip_fn;
 
@@ -74,11 +78,19 @@ static TSTATE *tstate_get(DWORD tid) {
 }
 
 static void on_builder_entry(CONTEXT *c) {
-    (void)c; InterlockedIncrement(&g_stats.builds);
+ ULONG64 ret=0;TSTATE *t=tstate_get(GetCurrentThreadId());
+ InterlockedIncrement(&g_stats.builds);
+ if(!t || !safe_copy(&ret,(void *)c->Rsp,8))return;
+ if(ret==g_addr[1] || ret==g_addr[3]){
+  if(t->depth<STASH_DEPTH){STASH *s=&t->s[t->depth];memset(s,0,sizeof(*s));s->camera=c->Rcx;s->source=c->Rdx;s->ret=ret;}
+  t->depth++;
+ }
 }
-
-static void on_builder_return(CONTEXT *c, int which) {
-    (void)c;(void)which;
+static void on_builder_return(CONTEXT *c,int which) {
+ TSTATE *t=tstate_get(GetCurrentThreadId());STASH st;(void)c;(void)which;
+ if(!t || t->depth<=0)return;
+ t->depth--;if(t->depth>=STASH_DEPTH)return;st=t->s[t->depth];
+ if(g_cfg.finish_eye)g_cfg.finish_eye(st.camera,st.ret,&st.eye,st.eye_applied);
 }
 
 static int source_is_camera_matrix(const float *m) {
@@ -101,16 +113,16 @@ static void head_matrix(const MGS4VR_CAM_ADJUST *a, float yaw_deg, float *h) {
     float cy = cosf(yaw_deg * d), sy = sinf(yaw_deg * d);
     float cp = cosf(a->pitch * d), sp = sinf(a->pitch * d);
     float cr = cosf(a->roll * d), sr = sinf(a->roll * d);
-    float ry[9] = { cy, 0, -sy,   0, 1, 0,   sy, 0, cy };      
-    float rx[9] = { 1, 0, 0,   0, cp, sp,   0, -sp, cp };      
-    float rz[9] = { cr, sr, 0,   -sr, cr, 0,   0, 0, 1 };      
+    float ry[9] = { cy, 0, -sy,   0, 1, 0,   sy, 0, cy };
+    float rx[9] = { 1, 0, 0,   0, cp, sp,   0, -sp, cp };
+    float rz[9] = { cr, sr, 0,   -sr, cr, 0,   0, 0, 1 };
     float t1[9], t2[9];
     int r, c, k;
     for (r = 0; r < 3; ++r) for (c = 0; c < 3; ++c) { t1[r * 3 + c] = 0; for (k = 0; k < 3; ++k) t1[r * 3 + c] += rz[r * 3 + k] * rx[k * 3 + c]; }
     for (r = 0; r < 3; ++r) for (c = 0; c < 3; ++c) { t2[r * 3 + c] = 0; for (k = 0; k < 3; ++k) t2[r * 3 + c] += t1[r * 3 + k] * ry[k * 3 + c]; }
     memset(h, 0, 16 * sizeof(float));
     for (r = 0; r < 3; ++r) for (c = 0; c < 3; ++c) h[r * 4 + c] = t2[r * 3 + c];
-    h[12] = a->x; h[13] = -a->y; h[14] = a->z; h[15] = 1.0f;   
+    h[12] = a->x; h[13] = -a->y; h[14] = a->z; h[15] = 1.0f;
 }
 
 static int on_this_stack(ULONG64 p) {
@@ -126,6 +138,8 @@ static int adjust_get(MGS4VR_CAM_ADJUST *out);
 
 static void adjust_entry(CONTEXT *c) {
     MGS4VR_CAM_ADJUST a;
+    MGS4VR_EYE_TICKET ticket;
+    int eye=0;
     ULONG64 ret = 0;
     float m[16], h[16], out[16], yaw, scale;
     TSTATE *t;
@@ -134,32 +148,58 @@ static void adjust_entry(CONTEXT *c) {
     if (!safe_copy(&ret, (const void *)c->Rsp, sizeof(ret)) || !ret) return;
     if (ret != g_adj_callers[0] && ret != g_adj_callers[1]) return;
     if (g_cfg.adjust_camera && c->Rcx != (ULONG64)g_cfg.adjust_camera) { InterlockedIncrement(&g_stats.adjust_other_camera); return; }
-    if (!c->Rdx || c->Rdx == c->Rcx) return;                  
+    if (!c->Rdx || c->Rdx == c->Rcx) return;                  /* never the in-place rebuilds */
     t = tstate_get(GetCurrentThreadId());
     if (!t) return;
-    
+    /* Context tracking runs whether or not an offset is enabled. The owner
+       site always builds from THE seam matrix; a build of the main camera from
+       the wrapper site with any OTHER source is the cutscene's own build
+       (stack+0x20 just before the seam pair, the cinematic camera object on
+       the heap just after it). */
     if (ret == g_adj_callers[1]) t->seam_src = c->Rdx;
     else if (!t->seam_src || c->Rdx != t->seam_src) {
-        
+        /* Frame structure, not call counting: the PRE-build uses another stack
+           matrix and comes right before the seam pair, so it flags that pair.
+           The POST-build (heap object) follows the pair and flags nothing. */
         if (on_this_stack(c->Rdx)) t->cine_pending = 1;
         InterlockedIncrement(&g_stats.cine_marks);
     }
     cinematic = t->cine_pending;
-    if (ret == g_adj_callers[1]) t->cine_pending = 0;       
+    if (ret == g_adj_callers[1]) t->cine_pending = 0;       /* the owner build closes the pair */
     memcpy(&scale, &c->Xmm2, sizeof(float));
-    if (g_cfg.stack_log) note_chain(c, ret, cinematic, scale);
+
     if (adjust_get(&a)) { t->last_adj = a; t->have_adj = 1; }
-    else if (t->have_adj) a = t->last_adj;               
+    else if (t->have_adj) a = t->last_adj;               /* one frame of the previous offset beats a mixed one */
     else return;
-    if (!a.enabled) return;
-    if (c->Rdx != t->seam_src) return;                        
-    if (!on_this_stack(c->Rdx)) { InterlockedIncrement(&g_stats.adjust_not_stack); return; }   
-    if (cinematic && a.cine_auto) { InterlockedIncrement(&g_stats.adjust_cinematic); return; }
+    if (!a.enabled && !g_cfg.prepare_eye) return;
+    if (c->Rdx != t->seam_src) return;                        /* only THE seam matrix ... */
+    if (!on_this_stack(c->Rdx)) { InterlockedIncrement(&g_stats.adjust_not_stack); return; }   /* ... and only a temporary */
+    if (cinematic && (a.cine_auto || g_cfg.prepare_eye)) { InterlockedIncrement(&g_stats.adjust_cinematic); return; }
     if (!safe_copy(m, (const void *)c->Rdx, sizeof(m))) { InterlockedIncrement(&g_stats.faults); return; }
     if (!source_is_camera_matrix(m)) { InterlockedIncrement(&g_stats.adjust_invalid); return; }
-    
+    /* Measured in run 04 (2026-09-19): MGS4 refills the stack matrix before
+       EACH of the two builds, so every call sees a fresh original and gets the
+       offset exactly once. This guard only covers the other possibility - a
+       caller that hands the same, already offset matrix to a second build -
+       and it must never fire when our write changed nothing: with a zero
+       offset out == in, a static camera then looks "already applied" forever
+       and a later offset change is ignored (the live stall in run 04). */
     if (t->have_last && memcmp(m, t->last_out, sizeof(m)) == 0 &&
         memcmp(t->last_out, t->last_in, sizeof(m)) != 0) { InterlockedIncrement(&g_stats.adjust_same); return; }
+    if(g_cfg.prepare_eye){
+        /* Exact reset camera sampled in run09 intro/loading at origin. This is
+           a conservative exclusion, not a universal gameplay/menu classifier. */
+        static const float reset[16]={-1,0,0,0,0,-1,0,0,0,0,1,0,0,0,0,1};
+        int reset_match=1,i;
+        for(i=0;i<16;++i)if(m[i]!=reset[i])reset_match=0;
+
+        eye=g_cfg.prepare_eye(c->Rcx,cinematic,&ticket);
+        if(eye<0)return;
+        if(eye>0 && reset_match)return;
+        if(!on_this_stack(c->Rsp+0x28))return;
+        if(eye>0)a=ticket.adjust;
+    }
+    if(!a.enabled)return;
     yaw = a.yaw;
     if (a.sweep_deg != 0.0f && g_qpf) {
         LARGE_INTEGER q;
@@ -175,9 +215,17 @@ static void adjust_entry(CONTEXT *c) {
     out[3] = out[7] = out[11] = 0.0f; out[15] = 1.0f;
     __try {
         memcpy((void *)c->Rdx, out, sizeof(out));
-
+        if(eye>0){
+            memcpy((void *)(c->Rsp+0x28),&ticket.args[2],4);
+            memcpy((void *)(c->Rsp+0x30),&ticket.args[3],4);
+            memcpy(&c->Xmm2,&ticket.args[0],4);memcpy(&c->Xmm3,&ticket.args[1],4);
+        }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedIncrement(&g_stats.faults); return; }
+    if(eye>0 && t->depth>0 && t->depth<=STASH_DEPTH){
+        STASH *st=&t->s[t->depth-1];
+        if(st->camera==c->Rcx && st->source==c->Rdx && st->ret==ret){st->eye=ticket;st->eye_applied=1;}
+    }
     memcpy(t->last_in, m, sizeof(m));
     memcpy(t->last_out, out, sizeof(out));
     t->have_last = 1;
@@ -189,9 +237,9 @@ void mgs4vr_cam_set_adjust(const MGS4VR_CAM_ADJUST *a) {
     while (InterlockedCompareExchange(&g_adj_lock, 1, 0) != 0) {
         if (++spins > 64) Sleep(0); else YieldProcessor();
     }
-    InterlockedIncrement(&g_adj_seq);        
+    InterlockedIncrement(&g_adj_seq);
     g_adj_live = *a;
-    InterlockedIncrement(&g_adj_seq);        
+    InterlockedIncrement(&g_adj_seq);
     InterlockedExchange(&g_adj_blur_off, a->blur_off ? 1 : 0);
     InterlockedExchange(&g_adj_lock, 0);
 }
@@ -220,19 +268,19 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
     c = ep->ContextRecord;
     rip = c->Rip;
-    
+
     for (i = 0; i < 4; ++i)
         if (g_addr[i] && rip == g_addr[i] && (c->Dr6 & (1ull << i))) { which = i; break; }
     if (which < 0) return EXCEPTION_CONTINUE_SEARCH;
     InterlockedIncrement(&g_stats.traps);
     if (g_armed) {
         if (which == 0) {
-            on_builder_entry(c);          
+            on_builder_entry(c);
             adjust_entry(c);
         } else if (which == 2 && g_skip_fn) {
             InterlockedIncrement(&g_stats.skip_calls);
             if (g_adj_blur_off) {
-                
+
                 ULONG64 ret = 0;
                 if (safe_copy(&ret, (const void *)c->Rsp, sizeof(ret)) && ret) {
                     c->Rax = 0; c->Rip = ret; c->Rsp += 8;
@@ -244,16 +292,16 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
         } else if (which == 2) on_proj(c);
         else on_builder_return(c, which);
     }
-    
+
     c->EFlags |= 0x10000;
     c->Dr6 = 0;
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 static ULONG64 dr7_value(void) {
-    ULONG64 v = 0x400;                  
+    ULONG64 v = 0x400;
     int i;
-    for (i = 0; i < 4; ++i) if (g_addr[i]) v |= 1ull << (i * 2);   
+    for (i = 0; i < 4; ++i) if (g_addr[i]) v |= 1ull << (i * 2);
     return v;
 }
 
@@ -262,7 +310,7 @@ static int set_dr(HANDLE th, int arm) {
     memset(&c, 0, sizeof(c));
     c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
     if (!GetThreadContext(th, &c)) return 0;
-    if (arm && (c.Dr7 & 0xFF) && c.Dr0 != g_addr[0]) return -1;   
+    if (arm && (c.Dr7 & 0xFF) && c.Dr0 != g_addr[0]) return -1;
     c.Dr0 = arm ? g_addr[0] : 0; c.Dr1 = arm ? g_addr[1] : 0;
     c.Dr2 = arm ? g_addr[2] : 0; c.Dr3 = arm ? g_addr[3] : 0;
     c.Dr6 = 0;
@@ -373,7 +421,7 @@ int mgs4vr_cam_arm(const MGS4VR_CAM_CONFIG *cfg, void (*log)(const char *fmt, ..
     if (ok & MGS4VR_CAM_OK_BUILDER) g_addr[0] = (ULONG64)cfg->builder;
     if (ok & MGS4VR_CAM_OK_PROJ)    g_addr[2] = (ULONG64)cfg->proj;
     g_skip_fn = (ULONG64)cfg->skip_fn;
-    if (g_skip_fn) g_addr[2] = g_skip_fn;                     
+    if (g_skip_fn) g_addr[2] = g_skip_fn;
     if (g_addr[0]) {
         if ((ok & MGS4VR_CAM_OK_RET0) || (!cfg->require_call_check && cfg->ret[0])) g_addr[1] = (ULONG64)cfg->ret[0];
         if ((ok & MGS4VR_CAM_OK_RET1) || (!cfg->require_call_check && cfg->ret[1])) g_addr[3] = (ULONG64)cfg->ret[1];
@@ -398,7 +446,7 @@ int mgs4vr_cam_arm(const MGS4VR_CAM_CONFIG *cfg, void (*log)(const char *fmt, ..
 }
 
 static void drain(void) {
-    
+
 }
 
 void mgs4vr_cam_poll(void) {
@@ -416,7 +464,7 @@ void mgs4vr_cam_disarm(void) {
     if (!g_veh) return;
     InterlockedExchange(&g_armed, 0);
     sweep_threads(0);
-    Sleep(50);                          
+    Sleep(50);
     RemoveVectoredExceptionHandler(g_veh);
     g_veh = NULL;
     drain();

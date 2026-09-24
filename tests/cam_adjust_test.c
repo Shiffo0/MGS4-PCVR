@@ -23,7 +23,7 @@
 #include <string.h>
 #include <limits.h>
 #include "../src/mgs4vr_cam.h"
-
+#include "../src/mgs4vr_eye.h"
 
 typedef struct { float m[16]; float pad[48]; } CAMOBJ;
 
@@ -168,6 +168,16 @@ static int same_values(const float *a, const float *b) {      /* numeric: -0.0 =
 
 #define CHECK(cond, name) do { if (!(cond)) { printf("FAIL: %s\n", name); return 1; } printf("ok: %s\n", name); } while (0)
 
+static int eye_applied_count,eye_rejected_count,eye_fail;
+static int test_prepare_eye(unsigned long long camera,int cine,MGS4VR_EYE_TICKET *t){
+ (void)camera;(void)cine;memset(t,0,sizeof(*t));if(eye_fail==2)return 0;if(eye_fail)return -1;
+ t->packet.valid=1;t->packet.pose_sequence=123;t->adjust.enabled=1;t->adjust.x=32;
+ t->args[0]=2;t->args[1]=.1f;t->args[2]=.2f;t->args[3]=1.3f;return 1;
+}
+static void test_finish_eye(unsigned long long camera,unsigned long long caller,const MGS4VR_EYE_TICKET *t,int applied){
+ (void)camera;if(caller!=(unsigned long long)g_ret[1])return;
+ if(applied && t->packet.pose_sequence==123)++eye_applied_count;else ++eye_rejected_count;
+}
 int main(void) {
     float orig[16];
     unsigned char sig[6];
@@ -345,6 +355,33 @@ int main(void) {
     game_frame(&g_main, 0.5, 0.0, 100.0, orig, 0);
     CHECK(memcmp(g_main.m, orig, 64) == 0, "disarmed: camera untouched");
     CHECK(p_blur() == 9, "disarmed: function untouched");
+    g_cfg.ret[0]=g_ret[1];g_cfg.prepare_eye=test_prepare_eye;g_cfg.finish_eye=test_finish_eye;
+    run_thread(arm_thread);CHECK(g_arm_result>0,"stereo camera hooks armed");
+    game_frame(&g_main,.5,0,100,orig,F_REFILL); /* learn seam after rearm */
+    eye_applied_count=eye_rejected_count=0;
+    game_frame(&g_main,.5,0,100,orig,F_REFILL);
+    CHECK(eye_applied_count==1 && check_pose(orig,g_main.m,0,0,0,32,0,0)<1e-4,"matching return acknowledges applied eye pose");
+    CHECK(seen_eye_args[0]==2 && seen_eye_args[1]==.1f && seen_eye_args[2]==.2f && seen_eye_args[3]==1.3f,"all four eye projection arguments reach native builder");
+    game_frame(&g_main,.5,0,100,orig,F_CORRUPT);
+    CHECK(eye_applied_count==1 && eye_rejected_count==1 && fabsf(g_main.pad[0]-2.8f)<1e-5,"invalid source leaves projection unchanged and rejects ticket");
+    eye_fail=1;game_frame(&g_main,.5,0,100,orig,F_REFILL);
+    CHECK(eye_rejected_count==2 && same_values(orig,g_main.m),"failed preparation cannot publish old ticket");
+    eye_fail=0;game_frame(&g_main,.5,0,100,orig,F_REFILL|F_CINE);
+    CHECK(eye_applied_count==1 && eye_rejected_count==3,"cinematic owner return rejects eye ticket");
+    game_frame(&g_main,.5,0,100,orig,F_REFILL);
+    CHECK(eye_applied_count==2,"eye application recovers after cinematic");
+    game_frame(&g_main,.5,0,100,orig,F_RESET);
+    CHECK(eye_applied_count==2 && eye_rejected_count==4 && same_values(orig,g_main.m),"recorded intro reset camera remains native and rejects stereo ticket");
+    CHECK(seen_eye_args[0]==1.8f && seen_eye_args[1]==0 && seen_eye_args[2]==0 && seen_eye_args[3]==1,"intro keeps native projection arguments");
+    game_frame(&g_main,.5,0,100,orig,F_REFILL);
+    CHECK(eye_applied_count==3,"gameplay resumes eye transforms after intro reset");
+    eye_fail=2;memset(&a,0,sizeof(a));a.enabled=1;a.yaw=20;a.cine_auto=1;mgs4vr_cam_set_adjust(&a);
+    game_frame(&g_main,.5,0,100,orig,F_REFILL);
+    CHECK(check_pose(orig,g_main.m,20,0,0,0,0,0)<1e-4,"stereo off callback preserves mono head-follow");
+    a.enabled=0;mgs4vr_cam_set_adjust(&a);game_frame(&g_main,.5,0,100,orig,F_REFILL);
+    CHECK(same_values(orig,g_main.m),"stereo off and head-follow off leaves camera native");
+
+    run_thread(disarm_thread);
     printf("PASS: cam_adjust_test\n");
     return 0;
 }

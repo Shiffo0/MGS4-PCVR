@@ -142,6 +142,18 @@ static XrResult XRAPI_CALL fk_EndFrame(XrSession s, const XrFrameEndInfo *ei) {
             InterlockedIncrement(&fk.pixel_reads);
         }
         InterlockedIncrement(&fk.layer_frames);
+    } else if(ei->layerCount==1 && ei->layers[0]->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION){
+        const XrCompositionLayerProjection *p=(const XrCompositionLayerProjection *)ei->layers[0];
+        D3D11_MAPPED_SUBRESOURCE map;int e;
+        if(fk.have_acquired || p->viewCount!=2)return XR_ERROR_LAYER_INVALID;
+        for(e=0;e<2;++e){
+            if(p->views[e].subImage.imageRect.offset.x!=(int)(e*fk.w/2) || p->views[e].subImage.imageRect.extent.width!=(int)fk.w/2)return XR_ERROR_LAYER_INVALID;
+            fk.stereo_views[e]=p->views[e];
+        }
+        ID3D11DeviceContext_CopyResource(fk.ctx,(ID3D11Resource *)fk.staging,(ID3D11Resource *)fk.img[fk.last_released]);
+        if(FAILED(ID3D11DeviceContext_Map(fk.ctx,(ID3D11Resource *)fk.staging,0,D3D11_MAP_READ,0,&map)))return XR_ERROR_RUNTIME_FAILURE;
+        for(e=0;e<2;++e)memcpy(fk.eye_pixels[e],(BYTE *)map.pData+(fk.h/2)*map.RowPitch+(fk.w/4+e*fk.w/2)*4,4);
+        ID3D11DeviceContext_Unmap(fk.ctx,(ID3D11Resource *)fk.staging,0);InterlockedIncrement(&fk.stereo_frames);
     } else if (ei->layerCount != 0) return XR_ERROR_LAYER_INVALID;
     return XR_SUCCESS;
 }
@@ -200,7 +212,12 @@ static int game_present(unsigned flags) {
     if(stereo_test){g_color[0]=(eye_serial&1)?0:1;g_color[1]=(eye_serial&1)?1:0;g_color[2]=0;}
     ID3D11DeviceContext_ClearRenderTargetView(g_ctx, rtv, g_color);
     ID3D11RenderTargetView_Release(rtv); ID3D11Texture2D_Release(back);
-    mgs4vr_xr_on_present(g_sc,flags);
+    if(stereo_test){
+        MGS4VR_EYE_PACKET p={0};p.valid=!missing_packet;p.epoch=7;p.camera_serial=eye_serial++;p.eye=p.camera_serial&1;
+        p.pose_sequence=50;p.display_time=fk.time;p.quat[3]=1;p.pos[0]=p.eye?.123f:-.234f;
+        p.fov[0]=-.9f;p.fov[1]=.7f;p.fov[2]=.8f;p.fov[3]=-.75f;
+        mgs4vr_xr_on_present_eye(g_sc,flags,&p);
+    }else mgs4vr_xr_on_present(g_sc, flags);
     return SUCCEEDED(IDXGISwapChain_Present(g_sc, 0, 0));
 }
 
@@ -344,13 +361,6 @@ int main(void) {
     mgs4vr_xr_get_stats(&st); { long w0 = st.frames_with_layer; want_layers = st.frames_without_layer + 10; CHECK(pump_until(c_nolayer, 5000), "layer switched off: frames continue with zero layers"); mgs4vr_xr_get_stats(&st); CHECK(st.frames_with_layer <= w0 + 1, "no theater layer while switched off"); }
     cfg.enabled = 1; mgs4vr_xr_configure(&cfg);
 
-    cfg.menu_open=1;cfg.menu_row=0;cfg.head_available=1;mgs4vr_xr_configure(&cfg);
-    {LONG before=fk.pixel_reads;for(i=0;i<12;++i){game_present(0);Sleep(12);}
-     CHECK(fk.pixel_reads>before && (fk.last_pixel[0]!=want_px[0] || fk.last_pixel[1]!=want_px[1] || fk.last_pixel[2]!=want_px[2]),"Home menu pixels reach actual theater texture");}
-    cfg.menu_open=0;mgs4vr_xr_configure(&cfg);
-    for(i=0;i<12;++i){game_present(0);Sleep(12);}
-    CHECK(fk.last_pixel[0]==want_px[0] && fk.last_pixel[1]==want_px[1] && fk.last_pixel[2]==want_px[2],"closing menu restores game picture");
-
     /* the game changes resolution */
     CHECK(SUCCEEDED(IDXGISwapChain_ResizeBuffers(g_sc, 0, 800, 450, DXGI_FORMAT_UNKNOWN, 0)), "ResizeBuffers succeeds (module holds no back buffer reference)");
     g_color[0] = 0.0f; g_color[1] = 0.0f; g_color[2] = 1.0f; want_px[0] = 0; want_px[1] = 0; want_px[2] = 255;
@@ -361,6 +371,36 @@ int main(void) {
     mgs4vr_xr_get_stats(&st); want_reinit = 1; want_layers = st.frames_with_layer + 5;
     CHECK(pump_until(c_reinit, 15000) && fk.inst_created == 2 && fk.sess_created == 2, "session loss: instance and session rebuilt, layers resume");
 
+    cfg.stereo=1;mgs4vr_xr_configure(&cfg);stereo_test=1;
+    for(i=0;i<80 && fk.stereo_frames<3;++i){game_present(0);Sleep(8);}
+    CHECK(fk.stereo_frames>=3 && fk.w==1600 && fk.h==450,"stereo projection layer packs two 800x450 eye images");
+    CHECK(fk.eye_pixels[0][0]==255 && fk.eye_pixels[0][1]==0 && fk.eye_pixels[1][0]==0 && fk.eye_pixels[1][1]==255,"left red and right green remain distinct in actual D3D11 textures");
+    CHECK(fabsf(fk.stereo_views[0].pose.position.x+.234f)<1e-6 && fabsf(fk.stereo_views[1].pose.position.x-.123f)<1e-6 && fabsf(fk.stereo_views[0].fov.angleLeft+.9f)<1e-6,"projection uses captured packet pose and asymmetric FOV, not latest located views");
+    missing_packet=1;game_present(0);Sleep(60);
+    {LONG n=fk.stereo_frames,q=fk.layer_frames;for(i=0;i<8;++i){game_present(0);Sleep(12);}CHECK(fk.stereo_frames==n && fk.layer_frames>q,"missing association switches to visible theater, no stale stereo pair");
+      CHECK(fk.last_quad.subImage.imageRect.extent.width==800 && fk.last_quad.subImage.imageRect.extent.height==450 && fabsf(fk.last_quad.size.height/cfg.width_m-450.0f/800)<1e-6,"fallback quad crops one full image with native aspect");
+      CHECK(fk.last_pixel[0]==255 || fk.last_pixel[1]==255,"fallback transports current backbuffer pixels");}
+    missing_packet=0;
+    {LONG n=fk.stereo_frames;for(i=0;i<15;++i){game_present(0);Sleep(12);}CHECK(fk.stereo_frames>n,"fresh adjacent eye pair recovers");}
+    view_mode=3;
+    for(i=0;i<5;++i){game_present(0);Sleep(12);}
+    {LONG n=fk.stereo_frames;for(i=0;i<10;++i){game_present(0);Sleep(12);}CHECK(fk.stereo_frames==n,"invalid XR tracking revokes captured stereo pair");}
+    view_mode=0;
+    {LONG n=fk.stereo_frames;for(i=0;i<15;++i){game_present(0);Sleep(12);}CHECK(fk.stereo_frames>n,"valid tracking and fresh images recover stereo");}
+    Sleep(180);
+    {LONG n=fk.stereo_frames;Sleep(50);CHECK(fk.stereo_frames==n,"stalled capture expires stereo pair");}
+    CHECK(SUCCEEDED(IDXGISwapChain_ResizeBuffers(g_sc,0,640,360,DXGI_FORMAT_UNKNOWN,0)),"stereo resize releases backbuffer");
+    for(i=0;i<20;++i){game_present(0);Sleep(12);}
+    CHECK(fk.w==1280 && fk.h==360,"stereo resize reconstructs both eye textures and packed swapchain");
+    cfg.stereo=0;cfg.menu_open=1;cfg.menu_row=3;cfg.menu_stereo=1;cfg.stereo_available=1;cfg.head_available=1;mgs4vr_xr_configure(&cfg);
+    for(i=0;i<20;++i){game_present(0);Sleep(12);}
+    CHECK(fk.w==640 && fk.h==360,"Home menu switches packed stereo to mono theater");
+    {LONG n=fk.stereo_frames;for(i=0;i<10;++i){game_present(0);Sleep(12);}CHECK(fk.stereo_frames==n,"Home menu remains a mono layer");}
+    CHECK(memcmp(fk.last_pixel,want_px,4)!=0,"Home menu pixels replace the scene inside the panel");
+    cfg.menu_open=0;cfg.stereo=1;mgs4vr_xr_configure(&cfg);
+    {LONG n=fk.stereo_frames;for(i=0;i<20;++i){game_present(0);Sleep(12);}CHECK(fk.stereo_frames>n && fk.w==1280,"closing Home menu recovers fresh stereo");}
+    cfg.stereo=0;mgs4vr_xr_configure(&cfg);for(i=0;i<15;++i){game_present(0);Sleep(12);}
+    CHECK(fk.w==640,"stereo off restores mono dimensions");
     mgs4vr_xr_stop();
     CHECK(fk.inst_created == fk.inst_destroyed && fk.sess_created == fk.sess_destroyed && fk.sc_created == fk.sc_destroyed && fk.sp_created == fk.sp_destroyed,
           "stop: every instance, session, swapchain and space destroyed");

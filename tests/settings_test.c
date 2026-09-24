@@ -15,4 +15,9 @@ int main(void){MGS4VR_MENU m;float q[4]={0,0,0,1},p[3]={0,0,0};
  q[1]=0;q[3]=1;head_pose(q,p);CHECK(fabsf(fabsf(captured.yaw)-30)<.001f);
  m.recenter++;configure(&m);head_pose(q,p);CHECK(fabsf(captured.yaw)<.001f);
  expire_pose(last_pose+401);CHECK(!captured.enabled);head_pose(q,p);CHECK(captured.enabled && fabsf(captured.yaw)<.001f);
+ m.stereo_available=1;m.stereo=1;configure(&m);CHECK(stereo_on && !follow);head_pose(q,p);CHECK(!captured.enabled);
+ m.open=1;configure(&m);CHECK(!stereo_on && m.stereo);
+ m.open=0;configure(&m);CHECK(stereo_on);
+ m.stereo=0;configure(&m);CHECK(!stereo_on && follow);
+ m.stereo=1;m.stereo_available=0;configure(&m);CHECK(!stereo_on);
  puts("PASS settings: unsupported profile, tracking on/off releases pose, new neutral, recenter and stale-pose recovery");return 0;}

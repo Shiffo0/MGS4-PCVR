@@ -1,6 +1,7 @@
 /* MGS4-PCVR - Copyright (c) 2026 Shiffo0. MIT; see LICENSE and THIRD_PARTY_NOTICES.md. */
 #ifndef MGS4VR_CAM_H
 #define MGS4VR_CAM_H
+typedef struct MGS4VR_EYE_TICKET MGS4VR_EYE_TICKET;
 
 #define MGS4VR_CAM_MAX_SRC  0x200
 #define MGS4VR_CAM_MAX_CAM  0x1000
@@ -23,6 +24,8 @@ typedef struct {
     void (*observe_built)(unsigned long long camera, unsigned long long caller);
     void (*observe_builder)(unsigned long long camera, unsigned long long caller);
     
+    int (*prepare_eye)(unsigned long long camera,int cinematic,MGS4VR_EYE_TICKET *ticket);
+    void (*finish_eye)(unsigned long long camera,unsigned long long caller,const MGS4VR_EYE_TICKET *ticket,int applied);
     void *adjust_callers[2];       
     void *adjust_camera;
     

@@ -1,13 +1,14 @@
-# v0.1.0
+# v0.1.1
 
-Initial mono-theater release for OpenXR headsets and gamepad play.
+Adds Stereo On / Off to the Home menu and supports Steam game build 25292043.
 
-- Home-key settings panel visible in the headset.
-- Optional headset rotation controls the game camera; off by default.
-- Recenter the screen and adjust its distance from 0.5 to 10.0 m.
-- Saved distance and camera-follow preference.
-- No development measurement logs, captures, or experimental stereo mode.
+- Switch between mono theater and stereo gameplay without restarting.
+- The Home panel stays in theater; closing it restores the selected mode.
+- Stereo uses headset tracking. Mono retains optional camera following.
+- Recenter resets the screen and neutral head pose; distance controls theater placement.
+- Stereo preference is saved in mgs4vr.ini. Mono remains the default.
+- No development probes, measurement files or camera captures.
 
-Motion controls are planned for a future version.
+Stereo uses alternating gameframes, not two views of the same simulation state. Menus/cutscenes use theater fallback when no valid eye pair exists. Motion controls remain planned; play with a gamepad.
 
-Requires DirectX 11. Seven automated test programs passed, including real D3D11 texture transport with a simulated OpenXR runtime. A fresh physical-headset acceptance test of this exact release build remains pending. See the README for supported game version and setup.
+Requires DirectX 11 and an active OpenXR headset. Eleven automated test programs passed, including mode switching, native camera transforms, frame ownership and D3D11 transport through a simulated OpenXR runtime. Physical-headset acceptance of this exact build is pending.
