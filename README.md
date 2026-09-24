@@ -36,7 +36,6 @@ The gamepad retains the game's normal controls. There are no tracked-controller 
 - An OpenXR headset and gamepad. Development testing used Quest 3 with the Meta/Oculus runtime; PS VR2/SteamVR hardware acceptance has not been established.
 - Camera following and stereo are version-gated to the supported PC executable (Steam build 25292043). If the executable differs, theater can still run but the menu shows camera following and stereo as **Unavailable**.
 - Stereo alternates native gameframes between eyes; at 60 gameframes/s each eye receives about 30 new images/s. The eyes are not rendered from the same simulation state. Mono camera following is rotation-only. Authored cutscene cameras retain theater fallback.
-- Eleven automated test programs cover menu navigation/rendering, live mode changes, camera transforms, native frame ownership, stale-image rejection, graphics hooks, OpenXR transport/recovery and loading outside the game. Physical-headset acceptance of this exact v0.1.1 build remains pending.
 
 ## Uninstall
 
