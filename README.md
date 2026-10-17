@@ -1,65 +1,106 @@
 # MGS4-PCVR
 
-Play Metal Gear Solid 4 on a virtual screen in an OpenXR headset using a gamepad.
+Play Metal Gear Solid 4 in VR with an OpenXR headset and motion controllers: stereo first person, your own hands on the weapons, and a VR settings page inside the game's Options menu.
 
-**v0.1.1 adds optional stereo gameplay.** Mono theater is the default. Enable Stereo in the Home menu for separate eye views with headset tracking. Menus and cutscenes fall back to theater when no valid stereo pair is available. Optional headset rotation can also steer the camera in mono mode. Motion controls are planned for a future version.
+**v0.2.0 is the first release with motion controls.** Earlier versions (v0.1.x) were a theater screen with gamepad play.
 
-## Download and install
+## Features
 
-1. Download **MGS4-PCVR-v0.1.1-win64.zip** from [Releases](https://github.com/Shiffo0/MGS4-PCVR/releases/latest).
-2. Close the game. Extract the ZIP into the **MGS4 folder containing `mgs4.exe`**.
-3. Start your headset connection and select its OpenXR runtime. Connect your gamepad.
-4. Launch the game normally. Keep the game window focused when using the mod menu.
+- **Stereo first person** with headset tracking, wide field of view and optional *Two Eye Rendering* (both eyes from the same game frame).
+- **Hands and arms follow your controllers** (two-bone IK on Snake's own arms). The weapon sits in your right hand; the left hand snaps to the foregrip for two-handed aiming.
+- **Scopes**: a lens scope shows the zoomed picture inside the ocular. Dot sights get a VR red dot.
+- **Wrist panels**: left inner wrist = watch with LIFE / PSYCHE / CAMO index and current item; right inner forearm = weapon and ammo.
+- **Radial menus**: hold the right stick click for weapons, hold the left stick click for items. In the item ring, pull the left trigger to use an item (e.g. a ration).
+- **CQC with the left hand**, OctoCamo reset by shaking both controllers, Solid Eye night vision by holding the left grip at your left ear.
+- **First-person action button** (wall press, context actions) and first-person view during CQC.
+- **HUD hidden in first person** (life bar and weapon/item panels); it stays in third person.
+- **VR Settings** inside the game: Options > CONTROLS > *VR Settings*.
 
-The package contains `mgs4vr.asi`, Ultimate ASI Loader (`winmm.dll`), the OpenXR loader, and documentation/licenses. It contains no game executable, game assets, measurement logs, camera captures, or development reports.
+## Roadmap
+- **VR Interactions on weapons** Manual reloading etc.
+- **Calibration** Calibration step.
 
-If another mod already supplies `winmm.dll`, back it up and check that mod's loader setup before replacing it. Remove the experimental `mgs4vr.on` file if upgrading from a development build; v0.1.1 uses `mgs4vr.ini` instead and ignores experimental marker settings.
 
-## Home menu
+## Requirements
 
-Press **Home** on the PC keyboard to open or close the settings panel in the headset. Pause the game first if you do not want keyboard navigation to affect the game underneath.
+- Windows 64-bit, the Steam PC version of Metal Gear Solid 4 (game build 25292043) with the **DirectX 11** renderer.
+- An OpenXR headset with motion controllers and a working OpenXR runtime. Developed and tested on Quest 3 (Meta/Oculus runtime and Quest Link).
+- Other headsets/runtimes are untested.
 
-| Option | Behavior |
+## Install
+
+1. Download **MGS4-PCVR-v0.2.0-win64.zip** from [Releases](https://github.com/Shiffo0/MGS4-PCVR/releases/latest).
+2. Close the game. Extract the ZIP into the **MGS4 folder that contains `mgs4.exe`** and allow it to overwrite older MGS4-PCVR files.
+3. Connect the headset and make sure its OpenXR runtime is active.
+4. Start the game from Steam. Keep the game window focused.
+
+If another mod already uses `winmm.dll`, back it up first and check that mod's loader setup.
+
+The ZIP contains the mod (`mgs4vr.asi`), Ultimate ASI Loader (`winmm.dll`), the OpenXR loader, the default settings files (`mgs4vr_*.on`, `mgs4vr.ini`, `mgs4vr_poses.txt`, `mgs4vr_weapons.txt`) and documentation/licenses. It contains no game files.
+
+## Controls (Quest Touch)
+
+| Input | Action |
 | --- | --- |
-| Camera follows headset: Yes / No | Enable or disable headset **rotation** driving the game camera. Default: No in mono mode. Stereo uses headset tracking automatically; switch stereo off to change this option. Movement stays on the gamepad. |
-| Stereo: On / Off | Switch immediately between stereo gameplay and mono theater. Default: Off. Unavailable if the game version or required hooks are not verified. |
-| Recenter screen | Put the virtual screen in front of your current head position/direction. Also reset the neutral head pose for camera following or stereo. |
-| Screen distance | Adjust from **0.5 to 10.0 metres**, in 0.1 m steps. Default: 2.5 m. |
+| **A** | Toggle first person |
+| **Right trigger** | Fire |
+| **Left stick** | Move (half deflection = walk/sneak, full = run) |
+| **Right stick** | Turn (smooth or snap, see VR Settings) |
+| **Right stick click (hold)** | Weapon ring: point and release to equip |
+| **Left stick click** | Tap: item on/off. Hold: item ring (point and release to equip, **left trigger** to use) |
+| **B** | Crouch / prone (Space) |
+| **X** | Action button (E): wall press and context actions |
+| **Menu button** | Tap: pause menu. Hold 1 s: recenter |
+| **Left grip at the foregrip** | Two-handed aiming |
+| **Left grip at the left ear** | Solid Eye night vision on/off |
+| **Left grip near an enemy** | CQC grab (punch forward, swing to throw) |
+| **Shake both controllers** | Reset OctoCamo |
+| **Look at your inner left wrist / right forearm** | Watch / weapon panel |
+| **Pistol: left grip on the slide, pull back** | Rack the slide |
+| **Pistol: left grip below the grip, push up** | Insert a magazine (reload) |
+| **Scoped rifle to your eye** | Scope view |
 
-Use **Up / Down** to select, **Enter** to toggle or recenter, and **Left / Right** to adjust distance. **Esc** closes the panel. Distance, camera-follow preference and stereo preference are saved in `mgs4vr.ini` beside the game. Recenter is session-local. The screen width is 3.2 m; distance changes its apparent size. Distance applies to theater, including the Home panel; it does not change stereo world scale. Opening Home temporarily switches to theater; closing it restores the selected mode.
+Keyboard **Home** opens the mod's theater panel (distance, recenter, stereo).
 
-The gamepad retains the game's normal controls. There are no tracked-controller bindings or motion controls in this release.
+## VR Settings
 
-## Requirements and current limits
+Options > CONTROLS > **VR Settings** has four tabs:
 
-- Windows 64-bit, a working OpenXR runtime, and the game's **DirectX 11** renderer. DirectX 12 and Vulkan are not supported.
-- An OpenXR headset and gamepad. Development testing used Quest 3 with the Meta/Oculus runtime; PS VR2/SteamVR hardware acceptance has not been established.
-- Camera following and stereo are version-gated to the supported PC executable (Steam build 25292043). If the executable differs, theater can still run but the menu shows camera following and stereo as **Unavailable**.
-- Stereo alternates native gameframes between eyes; at 60 gameframes/s each eye receives about 30 new images/s. The eyes are not rendered from the same simulation state. Mono camera following is rotation-only. Authored cutscene cameras retain theater fallback.
+- **VR DISPLAY**: Stereo, Two Eye Rendering, Camera Follows Headset, Screen Distance, Desktop Observer, HUD, Light Sprites, Shoulder Offset.
+- **VR TURNING**: smooth/snap turning and speed.
+- **VR WEAPONS**: Red Dot Sight, grip blend speed.
+- **VR ACTIONS**: CQC first person, camo shake.
+
+Settings are stored in `mgs4vr.ini` and the `mgs4vr_*.on` files next to the game.
+
+## Known issues
+
+- After a wall press via the action button the view can stay in third person; press **A** to return to first person.
+- Solid Eye labels are no longer doubled with Two Eye Rendering, but do not stay attached to enemies.
+- A scope mounted on the M4 Custom (Customize) can be invisible in first person with Two Eye Rendering.
+- The "WEAPON ACQUIRED" pop-up only shows in third person.
+- The lens scope does not line up on the D.E. (L.B.) and the Rail Gun.
+- An arm calibration step (arm length/height) is not available yet.
+
+## Bug reports
+
+Each module writes a small status file `mgs4vr_<module>_<process id>.txt` next to the game while it runs (overwritten every second). Please attach the files of the session where the problem happened, plus `mgs4vr.ini`, when you open an issue. They can be deleted at any time.
 
 ## Uninstall
 
-Close the game and remove `mgs4vr.asi` and `mgs4vr.ini`. Remove `winmm.dll` and `openxr_loader.dll` only if they were installed solely for this mod; restore any files you backed up.
+Close the game and remove `mgs4vr.asi`, `mgs4vr.ini`, `mgs4vr_*.on`, `mgs4vr_*.txt`, `mgs4vr_poses.txt` and `mgs4vr_weapons.txt`. Remove `winmm.dll` and `openxr_loader.dll` only if they were installed for this mod.
 
 ## Build from source
 
-Install Visual Studio 2022 C++ Build Tools (x64, Windows SDK) and [OpenXR SDK 1.1.59](https://github.com/KhronosGroup/OpenXR-SDK/tree/release-1.1.59).
-
-In an **x64 Native Tools Command Prompt**:
+Install Visual Studio 2022 C++ Build Tools (x64, Windows SDK) and the [OpenXR SDK 1.1.59](https://github.com/KhronosGroup/OpenXR-SDK/tree/release-1.1.59) headers, then in an **x64 Native Tools Command Prompt**:
 
 ```bat
 set OPENXR_INCLUDE=C:\path\to\OpenXR-SDK\include
 build.bat
-tests\test.bat
 ```
 
-The resulting mod is `build\mgs4vr.asi`. Use an x64 OpenXR loader alongside it. The source corresponds to the v0.1.1 release; the package manifest records the shipped file hashes. Build output and local test output are not checked into this repository.
-
-## Roadmap
-
-- Motion controls.
-- Further headset compatibility and comfort improvements.
+The result is `build\mgs4vr.asi` (player build, diagnostics off).
 
 ## License and credits
 
-Project-owned mod code is MIT licensed; see [LICENSE](LICENSE). Bundled components and reference-project credits are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This is an unofficial mod and does not include original game source code or assets.
+Project-owned mod code is MIT licensed; see [LICENSE](LICENSE). Bundled components and reference-project credits are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This is an unofficial mod. It does not include original game code or assets.

@@ -5,6 +5,7 @@
 typedef struct {
  uint32_t epoch, camera_serial, pose_sequence;
  int valid, eye;
+ int twoeye;          /* 13 Oct 2026: both eyes rendered in the same frame (native second view, side by side) */
  int64_t display_time;
  float quat[4],pos[3],fov[4],combined[16];
 } MGS4VR_EYE_PACKET;
@@ -15,6 +16,9 @@ int mgs4vr_packet_store(MGS4VR_PACKET_HISTORY_STATE *h,const MGS4VR_EYE_PACKET *
 int mgs4vr_packet_candidate(const MGS4VR_PACKET_HISTORY_STATE *h,uint32_t render_serial,MGS4VR_EYE_PACKET *out);
 int mgs4vr_packet_matrix_matches(const MGS4VR_EYE_PACKET *p,const float uniform[16]);
 int mgs4vr_packet_pair(const MGS4VR_EYE_PACKET *left,const MGS4VR_EYE_PACKET *right);
+/* 1 when both packets come from the eye module's scope view (mgs4vr_eye_scope): identical pose and the same
+   symmetric FOV in both eyes, which ordinary stereo (eye separation) never produces. Submitted head-locked. */
+int mgs4vr_packet_scoped(const MGS4VR_EYE_PACKET *left,const MGS4VR_EYE_PACKET *right);
 /* One render submission on one render thread. Begin snapshots ownership;
    uniforms are checked before finish; Present consumes at most once. */
 typedef struct {

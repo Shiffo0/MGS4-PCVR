@@ -1,6 +1,6 @@
 /* mgs4vr_profile.h - the ONE executable this build knows.
  *
- * Validated against Steam build 25292043; evidence/compat_2026-09-24.
+ * Validated against Steam build 25292043;
  * The PE tuple is what mgs4Ultra120 gates on; the SHA-256 is our own
  * stronger identity of the file on disk. A mismatch never blocks the
  * renderer observation (IAT hooks are version-independent) but it must
@@ -24,7 +24,7 @@
 #define MGS4VR_RVA_PROJ_SETTER      0x0e34d0u
 #define MGS4VR_RVA_RET_GAMEPLAY     0x0ba363u
 #define MGS4VR_RVA_RET_CINE_REBUILD 0x0eb1abu
-/* Measured in run 03 (2026-09-19), evidence/run03_2026-09-19_camera/camerakaart.md:
+/* Measured in run 03 (2026-09-19)
    the end-of-frame camera update builds the main camera twice from a temporary
    camera-to-world matrix on the stack, from these two call sites. */
 #define MGS4VR_RVA_RET_WRAPPER      0x0b9b60u

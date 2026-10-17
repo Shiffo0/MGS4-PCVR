@@ -266,7 +266,14 @@ static void adopt_swapchain(IDXGISwapChain *sc, IUnknown *device_arg) {
     IDXGISwapChain1 *sc1 = NULL;
     void *old;
     InterlockedIncrement(&g_stats.swapchains);
-    if (!g_swapchain) { IDXGISwapChain_AddRef(sc); g_swapchain = sc; }
+    if (!g_swapchain) {
+        /* Pin d3d11/dxgi: at shutdown the game freed d3d11.dll while our XR thread / hooks still ran into it ->
+           execute fault in d3d11.dll_unloaded at every second close (13 Oct 2026: 22 of 45 sim exits, WER). */
+        static const char *const pin[2] = { "d3d11.dll", "dxgi.dll" }; HMODULE pinned; int i;
+        for (i = 0; i < 2; ++i)
+            log_msg("  pin %s: %s", pin[i], GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_PIN, pin[i], &pinned) ? "ok" : "not loaded");
+        IDXGISwapChain_AddRef(sc); g_swapchain = sc;
+    }
     identify_backend(device_arg, sc);
     old = patch_slot((void **)&sc->lpVtbl->Present, (void *)hook_present, "IDXGISwapChain::Present");
     if (old) g_real_present = (PRESENT_FN)old;

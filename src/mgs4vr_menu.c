@@ -4,18 +4,21 @@
 #include <stdio.h>
 #include <string.h>
 #include "mgs4vr_menu.h"
-void mgs4vr_menu_init(MGS4VR_MENU *m,int follow,int cm){memset(m,0,sizeof(*m));m->follow=!!follow;m->distance_cm=cm<50?50:cm>1000?1000:cm;}
+void mgs4vr_menu_init(MGS4VR_MENU *m,int follow,int cm){memset(m,0,sizeof(*m));m->observer=2;m->twohanded=1;m->follow=!!follow;m->distance_cm=cm<50?50:cm>1000?1000:cm;}
 int mgs4vr_menu_key(MGS4VR_MENU *m,unsigned key){
  int before;
  if(key==VK_HOME){m->open=!m->open;return 1;}
  if(!m->open)return 0;
  if(key==VK_ESCAPE){m->open=0;return 1;}
- if(key==VK_UP){m->row=(m->row+3)%4;return 1;}
- if(key==VK_DOWN){m->row=(m->row+1)%4;return 1;}
+ if(key==VK_UP){m->row=(m->row+6)%7;return 1;}
+ if(key==VK_DOWN){m->row=(m->row+1)%7;return 1;}
  if(key!=VK_LEFT && key!=VK_RIGHT && key!=VK_RETURN)return 0;
  if(m->row==0){if(!m->available || m->stereo)return 0;m->follow=!m->follow;m->recenter++;return 1;}
  if(m->row==1){if(key==VK_RETURN){m->recenter++;return 1;}return 0;}
  if(m->row==3){if(!m->stereo_available)return 0;m->stereo=!m->stereo;m->recenter++;return 1;}
+ if(m->row==4){m->observer=(m->observer+(key==VK_LEFT?2:1))%3;return 1;}
+ if(m->row==5){m->twohanded=!m->twohanded;return 1;}
+ if(m->row==6){m->smoothing_ms=(m->smoothing_ms+(key==VK_LEFT?90:30))%120;return 1;}
  before=m->distance_cm;
  if(key==VK_LEFT)m->distance_cm-=10;else if(key==VK_RIGHT)m->distance_cm+=10;
  if(m->distance_cm<50)m->distance_cm=50;if(m->distance_cm>1000)m->distance_cm=1000;
@@ -36,18 +39,21 @@ void *mgs4vr_menu_bitmap(const MGS4VR_MENU *m,int w,int h){
  }
  if(have && memcmp(m,&previous,sizeof(*m))==0)return pixels;
  rect.left=rect.top=0;rect.right=w;rect.bottom=h;brush=CreateSolidBrush(RGB(18,24,34));FillRect(dc,&rect,brush);DeleteObject(brush);
- font=CreateFontA(-h/15,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,"Segoe UI");
+ font=CreateFontA(-h/22,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,"Segoe UI");
  old_font=SelectObject(dc,font);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(235,241,250));
- for(row=0;row<7;++row){
-  rect.left=w/24;rect.right=w-w/24;rect.top=h/16+row*h/8;rect.bottom=rect.top+h/10;
-  if(row>=1 && row<=4 && m->row==row-1){brush=CreateSolidBrush(RGB(32,68,100));FillRect(dc,&rect,brush);DeleteObject(brush);}
+ for(row=0;row<10;++row){
+  rect.left=w/24;rect.right=w-w/24;rect.top=h/24+row*h/11;rect.bottom=rect.top+h/12;
+  if(row>=1 && row<=7 && m->row==row-1){brush=CreateSolidBrush(RGB(32,68,100));FillRect(dc,&rect,brush);DeleteObject(brush);}
   if(row==0)strcpy_s(text,sizeof(text),"MGS4-PCVR  v0.1.1");
   if(row==1)sprintf_s(text,sizeof(text),"Camera follows headset: %s",!m->available?"Unavailable":m->stereo?"Yes (stereo)":m->follow?"Yes":"No");
   if(row==2)strcpy_s(text,sizeof(text),"Recenter screen  [Enter]");
   if(row==3)sprintf_s(text,sizeof(text),"Screen distance: %.1f m  [Left / Right]",m->distance_cm/100.0);
   if(row==4)sprintf_s(text,sizeof(text),"Stereo: %s",!m->stereo_available?"Unavailable":m->stereo?"On":"Off (mono theater)");
-  if(row==5)strcpy_s(text,sizeof(text),"Up / Down: select    Enter: apply");
-  if(row==6)strcpy_s(text,sizeof(text),"Home / Esc: close    Gamepad: play");
+  if(row==5)sprintf_s(text,sizeof(text),"Desktop observer: %s",m->observer==2?"Both eyes":m->observer==1?"Right eye":"Off");
+  if(row==6)sprintf_s(text,sizeof(text),"Two-hand aiming: %s",m->twohanded?"On":"Off");
+  if(row==7){if(m->smoothing_ms)sprintf_s(text,sizeof(text),"Support-hand smoothing: %d ms",m->smoothing_ms);else strcpy_s(text,sizeof(text),"Support-hand smoothing: Off");}
+  if(row==8)strcpy_s(text,sizeof(text),"Up / Down: select    Enter: apply");
+  if(row==9)strcpy_s(text,sizeof(text),"Home / Esc: close    Gamepad: play");
   rect.left+=w/60;DrawTextA(dc,text,-1,&rect,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
  }
  SelectObject(dc,old_font);DeleteObject(font);GdiFlush();

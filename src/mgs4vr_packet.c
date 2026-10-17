@@ -23,7 +23,7 @@ int mgs4vr_packet_candidate(const MGS4VR_PACKET_HISTORY_STATE *h,uint32_t serial
  if(!h)return 0;
  p=&h->slots[(serial-1)%MGS4VR_PACKET_HISTORY];prev=&h->slots[(serial-2)%MGS4VR_PACKET_HISTORY];
  if(!p->valid || !prev->valid || p->epoch!=h->epoch || prev->epoch!=h->epoch ||
-    p->camera_serial!=serial-1 || prev->camera_serial!=serial-2 || p->eye==prev->eye)return 0;
+    p->camera_serial!=serial-1 || prev->camera_serial!=serial-2 || (p->eye==prev->eye && !p->twoeye))return 0;   /* two-eye frames do not alternate */
  *out=*p;return 1;
 }
 int mgs4vr_packet_matrix_matches(const MGS4VR_EYE_PACKET *p,const float m[16]){
@@ -36,6 +36,7 @@ int mgs4vr_packet_matrix_matches(const MGS4VR_EYE_PACKET *p,const float m[16]){
 }
 int mgs4vr_packet_pair(const MGS4VR_EYE_PACKET *l,const MGS4VR_EYE_PACKET *r){
  if(!sane(l)||!sane(r)||l->eye!=0||r->eye!=1||l->epoch!=r->epoch)return 0;
+ if(l->twoeye||r->twoeye)return l->twoeye&&r->twoeye&&l->camera_serial==r->camera_serial;   /* same frame, two views */
  return (uint32_t)(l->camera_serial-r->camera_serial)==1 || (uint32_t)(r->camera_serial-l->camera_serial)==1;
 }
 
@@ -53,4 +54,10 @@ int mgs4vr_packet_take(MGS4VR_PACKET_SUBMISSION *s,uint32_t current_epoch,MGS4VR
  int ok=s->complete && s->matched && s->packet.valid && s->packet.epoch==current_epoch;
  memset(out,0,sizeof(*out));if(ok)*out=s->packet;
  memset(s,0,sizeof(*s));return ok;
+}
+
+int mgs4vr_packet_scoped(const MGS4VR_EYE_PACKET *l,const MGS4VR_EYE_PACKET *r){
+ if(!l||!r||!l->valid||!r->valid)return 0;
+ if(memcmp(l->pos,r->pos,sizeof(l->pos))||memcmp(l->quat,r->quat,sizeof(l->quat))||memcmp(l->fov,r->fov,sizeof(l->fov)))return 0;
+ return l->fov[1]>0&&l->fov[0]==-l->fov[1]&&l->fov[2]==l->fov[1]&&l->fov[3]==-l->fov[1];
 }

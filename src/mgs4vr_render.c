@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <string.h>
 #include "mgs4vr_render.h"
+#include "mgs4vr_gpu_timer.h"
 #include "mgs4vr_profile.h"
 #include "mgs4vr_eye.h"
 #include "mgs4vr_uniform.h"
@@ -24,13 +25,15 @@ static int decode(void *frame){
  }__except(EXCEPTION_EXECUTE_HANDLER){return 0;}
 }
 static void __fastcall submit(void *self,void *frame,void *a,void *b){
- unsigned serial=0;int ok=0;memset(&delivery,0,sizeof(delivery));
+ unsigned serial=0;int ok=0,timing=-1;void *timing_context=NULL;memset(&delivery,0,sizeof(delivery));
  __try{
   if(enabled && frame){serial=*(unsigned *)((BYTE *)frame+0x2503728);delivery.render_serial=serial;
    if(mgs4vr_eye_candidate(serial,GetTickCount64(),&delivery.packet))ok=decode(frame);
   }
  }__except(EXCEPTION_EXECUTE_HANDLER){ok=0;}
- original(self,frame,a,b);mgs4vr_packet_finish(&delivery,ok);
+ __try{timing_context=*(void **)((BYTE *)self+0x3f0);}__except(EXCEPTION_EXECUTE_HANDLER){timing_context=NULL;}
+ timing=mgs4vr_gpu_begin(timing_context,serial,ok);
+ original(self,frame,a,b);mgs4vr_gpu_end(timing);mgs4vr_packet_finish(&delivery,ok);
 }
 int mgs4vr_render_start(void *base){
  BYTE *b=base;void *renderer;void **vt;DWORD old,tmp;
@@ -59,3 +62,4 @@ int mgs4vr_render_take(MGS4VR_EYE_PACKET *packet){
  if(!enabled){memset(packet,0,sizeof(*packet));return 0;}
  return mgs4vr_packet_take(&delivery,mgs4vr_eye_epoch(),packet);
 }
+

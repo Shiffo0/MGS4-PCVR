@@ -38,6 +38,8 @@ static MGS4VR_CAM_ADJUST g_adj_live;
 static volatile LONG g_adj_blur_off;
 static LONGLONG g_qpf, g_qpc0;
 static ULONG64 g_skip_fn;
+static int (*volatile g_source_hook)(float *m);
+void mgs4vr_cam_set_source_hook(int (*fn)(float *m)) { g_source_hook = fn; }
 
 static MGS4VR_CAM_STATS g_stats;
 static TSTATE g_tstate[MAX_TSTATE];
@@ -143,7 +145,7 @@ static void adjust_entry(CONTEXT *c) {
     ULONG64 ret = 0;
     float m[16], h[16], out[16], yaw, scale;
     TSTATE *t;
-    int r, col, k, cinematic;
+    int r, col, k, cinematic, replaced = 0;
     if (!g_adj_callers[0] && !g_adj_callers[1]) return;
     if (!safe_copy(&ret, (const void *)c->Rsp, sizeof(ret)) || !ret) return;
     if (ret != g_adj_callers[0] && ret != g_adj_callers[1]) return;
@@ -177,6 +179,9 @@ static void adjust_entry(CONTEXT *c) {
     if (cinematic && (a.cine_auto || g_cfg.prepare_eye)) { InterlockedIncrement(&g_stats.adjust_cinematic); return; }
     if (!safe_copy(m, (const void *)c->Rdx, sizeof(m))) { InterlockedIncrement(&g_stats.faults); return; }
     if (!source_is_camera_matrix(m)) { InterlockedIncrement(&g_stats.adjust_invalid); return; }
+    { int (*hook)(float *) = g_source_hook;                    /* CQC first person: head camera instead of the third-person one */
+      int hr = hook ? hook(m) : 0;                                /* 2 = replaced, without the head offset (pose tool camera) */
+      if (hr) { replaced = hr; __try { memcpy((void *)c->Rdx, m, sizeof(m)); } __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedIncrement(&g_stats.faults); return; } } }
     /* Measured in run 04 (2026-09-19): MGS4 refills the stack matrix before
        EACH of the two builds, so every call sees a fresh original and gets the
        offset exactly once. This guard only covers the other possibility - a
@@ -200,6 +205,7 @@ static void adjust_entry(CONTEXT *c) {
         if(eye>0)a=ticket.adjust;
     }
     if(!a.enabled)return;
+    if (replaced == 2) { a.yaw = a.pitch = a.roll = 0; a.x = a.y = a.z = 0; a.sweep_deg = 0; }   /* pose camera: exactly the tool's view, both eyes */
     yaw = a.yaw;
     if (a.sweep_deg != 0.0f && g_qpf) {
         LARGE_INTEGER q;

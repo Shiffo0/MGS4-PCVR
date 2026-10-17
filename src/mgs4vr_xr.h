@@ -1,8 +1,7 @@
 /* mgs4vr_xr.h - W05: OpenXR session + image transport for MGS4 (D3D11).
  *
- * Architecture carried over from the MGS2 mod (mgs2-pcvr-v3 asi/dg_hook/dg_xr.c,
- * sha256 ed155f5ba016e60e..., read as reference; this file is a new, smaller
- * implementation without any MGS2 game contract):
+ * Own OpenXR session/swapchain
+ * implementation:
  *
  *   render thread (the game's Present)      XR thread (ours)
  *   ---------------------------------      --------------------------------
@@ -17,7 +16,7 @@
  * Nothing here touches game memory. The game keeps running flat on the monitor
  * and is fully playable when no runtime or no headset is present; a headset
  * that is taken off and put back on must come back without a restart (the
- * MGS2 "run 15" lesson: STOPPING -> IDLE -> READY is a normal cycle).
+ * STOPPING -> IDLE -> READY is a normal cycle).
  *
  * Thread safety: two threads drive one D3D11 immediate context, so the device
  * must NOT have been created with D3D11_CREATE_DEVICE_SINGLETHREADED (bgfx asks
@@ -34,7 +33,9 @@ typedef struct {
     float height_offset_m;  /* screen centre relative to eye height */
     long  recenter;         /* change the value to re-anchor the screen */
     int stereo; /* alternating-eye projection; theater while menu is open */
+    int observer; /* 0 off, 1 right eye, 2 both eyes; desktop only */
     int menu_open,menu_row,follow_head,head_available,menu_stereo,stereo_available;
+    int twohanded,smoothing_ms;
 } MGS4VR_XR_CONFIG;
 
 typedef struct {
@@ -46,11 +47,17 @@ typedef struct {
     long errors;
     long no_hmd_polls;
     long poses;                     /* head poses published to the callback */
+    long headlocked_layers;         /* stereo layers submitted head-locked (scope view) */
+    long wrist_layers;              /* wrist panel quads submitted */
+    long twoeye_frames;
+    long lens_captures, lens_layers, reticle_layers, lens_inscope;    /* lens scope: squares cut at Present, quad layers submitted, reticle quads */             /* presents captured as two eyes from one frame (mgs4vr_twoeye) */
+    long hands, input_errors;       /* controller samples published / xrSyncActions failures */
     long device_singlethreaded;     /* 1 = refused: device was created SINGLETHREADED */
     unsigned width, height;         /* capture / swapchain size */
     long long format;               /* chosen swapchain format (DXGI_FORMAT) */
     float anchor_pos[3], anchor_quat[4];
     float last_head_pos[3];
+    long theater_w;   /* sub-image width of the last theater quad (16 Oct: half in two-eye mode = half menus) */
 } MGS4VR_XR_STATS;
 
 /* loader_path: full path of openxr_loader.dll, or NULL for the default search.
@@ -89,6 +96,38 @@ void mgs4vr_xr_set_views_callback(void (*cb)(const MGS4VR_XR_VIEWS *views));
 void mgs4vr_xr_screen_pose(const float head_quat[4], const float head_pos[3], float dist_m, float height_offset_m,
                            float out_quat[4], float out_pos[3]);
 
+/* Motion controllers, LOCAL space, predicted for display_time. Poses are
+   ABSOLUTE per frame straight from the runtime (never integrated: drift
+   lesson). flags are XrSpaceLocationFlags (bit0 orientation valid, bit1 position
+   valid, bit2 orientation tracked, bit3 position tracked). active = the runtime
+   has a bound, active pose source for that hand. buttons: bit0 stick click,
+   bit1 primary (A/X), bit2 secondary (B/Y), bit3 menu. Callback runs on the XR
+   thread; copy synchronously. Controllers failing to initialise never affect
+   the session: then the callback is simply never called. */
+typedef struct {
+    int active;
+    unsigned grip_flags, aim_flags;
+    float grip_quat[4], grip_pos[3];
+    float aim_quat[4], aim_pos[3];
+    float trigger, squeeze, stick[2];
+    unsigned buttons;
+} MGS4VR_XR_HAND;
+typedef struct {
+    unsigned long sequence;
+    long long display_time;
+    int focused;                    /* xrSyncActions reported a focused session */
+    int head_valid;
+    float head_quat[4], head_pos[3];
+    MGS4VR_XR_HAND hand[2];         /* 0 = left, 1 = right */
+} MGS4VR_XR_HANDS;
+void mgs4vr_xr_set_hands_callback(void (*cb)(const MGS4VR_XR_HANDS *hands));
+/* Input bring-up status: 1 actions attached, 0 not (yet), -1 unavailable. */
+int mgs4vr_xr_input_state(void);
+
 #include "mgs4vr_packet.h"
 void mgs4vr_xr_on_present_eye(void *swapchain,unsigned flags,const MGS4VR_EYE_PACKET *packet);
+/* Two-eye mode: left half of the back buffer = left eye, right half = right eye (same frame). */
+/* Diagnostic: the next stereo present writes both eye images to <prefix>0.raw and <prefix>1.raw. */
+void mgs4vr_xr_request_eye_dump(const char *prefix);
+void mgs4vr_xr_on_present_two(void *swapchain,unsigned flags,const MGS4VR_EYE_PACKET *left,const MGS4VR_EYE_PACKET *right);
 #endif

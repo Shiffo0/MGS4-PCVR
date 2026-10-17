@@ -80,5 +80,7 @@ void mgs4vr_cam_disarm(void);
 void mgs4vr_cam_get_stats(MGS4VR_CAM_STATS *out);
 
 void mgs4vr_cam_set_adjust(const MGS4VR_CAM_ADJUST *a);
+/* Game thread, camera seam: may replace the source matrix before the VR offset (1 = replaced). */
+void mgs4vr_cam_set_source_hook(int (*fn)(float *m));
 
 #endif
